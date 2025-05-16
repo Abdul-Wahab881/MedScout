@@ -2,12 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
-import torch
-import torchvision.transforms as transforms
-from torchvision import models
-from PIL import Image
 import random
-import urllib
 
 # ---- CONFIG ----
 st.set_page_config(page_title="MediScout Pakistan", layout="wide")
@@ -47,29 +42,33 @@ def authenticate(username, password):
 
 # ---- LOGIN / SIGNUP ----
 if not st.session_state.logged_in:
-    st.sidebar.title("Login / Signup")
-    choice = st.sidebar.radio("Choose Option", ['Login', 'Signup'])
+    st.title("MediScout Pakistan - Login / Signup")
 
-    username = st.sidebar.text_input("Username")
-    password = st.sidebar.text_input("Password", type="password")
+    users_df = load_users()
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    choice = st.radio("Choose Option", ['Login', 'Signup'])
 
     if choice == 'Login':
-        if st.sidebar.button("Login"):
+        if st.button("Login"):
             if authenticate(username, password):
                 st.session_state.logged_in = True
                 st.session_state.username = username
+                st.success("Logged in successfully!")
                 st.experimental_rerun()
             else:
-                st.sidebar.error("Invalid username or password.")
+                st.error("Invalid username or password.")
     else:
-        if st.sidebar.button("Signup"):
+        if st.button("Signup"):
             if save_user(username, password):
-                st.sidebar.success("Signup successful. Please login.")
+                st.success("Signup successful! Please login.")
             else:
-                st.sidebar.error("Username already exists.")
+                st.error("Username already exists.")
     st.stop()
 
-# ---- LOGGED IN USER ----
+# ---- LOGGED IN USER SECTION ----
 st.sidebar.success(f"Welcome, {st.session_state.username}")
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
@@ -92,9 +91,11 @@ def save_patient(new_patient):
 # ---- MAIN UI ----
 st.title("🧠 MediScout Pakistan Prototype")
 
+# Toggle Register Form
 if st.button("➕ Register New Patient"):
     st.session_state.show_form = not st.session_state.show_form
 
+# Register New Patient Form
 if st.session_state.show_form:
     with st.form("patient_form"):
         st.subheader("Patient Registration Form")
@@ -115,7 +116,7 @@ if st.session_state.show_form:
             })
             st.success(f"Patient {name} added successfully!")
 
-# ---- DELETE PATIENT ----
+# Delete Patient
 st.subheader("🗑️ Delete Patient Record")
 del_name = st.text_input("Enter name to delete")
 if st.button("Delete Patient"):
@@ -127,7 +128,7 @@ if st.button("Delete Patient"):
     else:
         st.warning("Name not found.")
 
-# ---- SEARCH PATIENT ----
+# Search Patient
 st.subheader("🔍 Search Patient")
 search_name = st.text_input("Search by Name")
 if st.button("Search"):
@@ -139,24 +140,29 @@ if st.button("Search"):
     else:
         st.warning("No patient found.")
 
-# ---- FILTER + VISUALIZATION ----
+# Load patient data for filtering & visualization
 patients_df = load_patients()
+
 if not patients_df.empty:
+    # Add lat/lon for visualization simulation if missing
     if 'lat' not in patients_df.columns:
         patients_df['lat'] = [round(random.uniform(24.7, 25.3), 4) for _ in range(len(patients_df))]
     if 'lon' not in patients_df.columns:
         patients_df['lon'] = [round(random.uniform(67.0, 67.4), 4) for _ in range(len(patients_df))]
-    if 'disease_flag' not in patients_df.columns:
-        patients_df['disease_flag'] = patients_df['disease'].apply(lambda x: 1 if pd.notna(x) and x.strip() != "" else 0)
 
+    # Rename disease column for consistency
     patients_df.rename(columns={'disease': 'diseases'}, inplace=True)
 
+    st.header("📊 Filter Disease Data")
+
     symptoms_unique = patients_df['symptoms'].dropna().unique()
-    if len(symptoms_unique) > 0:
-        st.header("📊 Filter Disease Data")
+    if len(symptoms_unique) == 0:
+        st.info("No symptom data available.")
+    else:
         selected_symptom = st.selectbox("Select Symptom", symptoms_unique)
         age_range = st.slider("Select Age Range", 1, 120, (1, 120))
-        selected_gender = st.selectbox("Select Gender", ['Select'] + patients_df['gender'].dropna().unique().tolist())
+        gender_options = ['Select'] + patients_df['gender'].dropna().unique().tolist()
+        selected_gender = st.selectbox("Select Gender", gender_options)
 
         filtered_df = patients_df[patients_df['symptoms'] == selected_symptom]
         filtered_df = filtered_df[(filtered_df['age'] >= age_range[0]) & (filtered_df['age'] <= age_range[1])]
@@ -176,33 +182,19 @@ if not patients_df.empty:
         else:
             st.info("No data for selected filters.")
 else:
-    st.warning("No patient data found. Please add some records.")
+    st.info("No patient data available. Please add some records.")
 
-# ---- AI IMAGE CLASSIFICATION ----
-st.header("🧪 Upload Image for AI Diagnosis")
-uploaded_file = st.file_uploader("Upload a medical image (X-ray, skin lesion, etc.)", type=["jpg", "png", "jpeg"])
+# ======= Image Classification Placeholder =======
+st.header("🖼️ Disease Image Classification")
 
+uploaded_file = st.file_uploader("Upload a medical image (e.g., skin lesion) for classification", type=["jpg", "jpeg", "png"])
 if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert('RGB')
-    st.image(image, caption="Uploaded Image", use_column_width=True)
+    st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
+    st.write("Running image classification (demo)...")
 
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-    ])
-    input_tensor = transform(image).unsqueeze(0)
-
-    model = models.resnet18(pretrained=True)
-    model.eval()
-
-    with torch.no_grad():
-        outputs = model(input_tensor)
-        _, predicted = torch.max(outputs, 1)
-
-    # Get ImageNet class labels
-    LABELS_URL = "https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"
-    response = urllib.request.urlopen(LABELS_URL)
-    class_names = [line.strip() for line in response.readlines()]
-    predicted_class = class_names[predicted.item()].decode()
-
-    st.success(f"🧠 AI Diagnosis Suggestion: **{predicted_class}**")
+    # Here you would insert your AI model code to classify the image
+    # For demo, we just show a placeholder result:
+    import time
+    with st.spinner('Classifying...'):
+        time.sleep(2)  # Simulate processing time
+    st.success("Classification Result: Benign Lesion (Demo)")
