@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
+import torch
+from torchvision import models, transforms
+from PIL import Image
 import random
 
 # ---- CONFIG ----
@@ -16,6 +19,10 @@ if 'username' not in st.session_state:
     st.session_state.username = ""
 if 'show_form' not in st.session_state:
     st.session_state.show_form = False
+if 'uploaded_image' not in st.session_state:
+    st.session_state.uploaded_image = None
+if 'image_classification' not in st.session_state:
+    st.session_state.image_classification = None
 
 # ---- USER MANAGEMENT FUNCTIONS ----
 def load_users():
@@ -42,33 +49,29 @@ def authenticate(username, password):
 
 # ---- LOGIN / SIGNUP ----
 if not st.session_state.logged_in:
-    st.title("MediScout Pakistan - Login / Signup")
+    st.sidebar.title("Login / Signup")
+    choice = st.sidebar.radio("Choose Option", ['Login', 'Signup'])
 
-    users_df = load_users()
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    choice = st.radio("Choose Option", ['Login', 'Signup'])
+    username = st.sidebar.text_input("Username")
+    password = st.sidebar.text_input("Password", type="password")
 
     if choice == 'Login':
-        if st.button("Login"):
+        if st.sidebar.button("Login"):
             if authenticate(username, password):
                 st.session_state.logged_in = True
                 st.session_state.username = username
-                st.success("Logged in successfully!")
                 st.experimental_rerun()
             else:
-                st.error("Invalid username or password.")
+                st.sidebar.error("Invalid username or password.")
     else:
-        if st.button("Signup"):
+        if st.sidebar.button("Signup"):
             if save_user(username, password):
-                st.success("Signup successful! Please login.")
+                st.sidebar.success("Signup successful. Please login.")
             else:
-                st.error("Username already exists.")
+                st.sidebar.error("Username already exists.")
     st.stop()
 
-# ---- LOGGED IN USER SECTION ----
+# ---- LOGGED IN USER ----
 st.sidebar.success(f"Welcome, {st.session_state.username}")
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
@@ -91,11 +94,11 @@ def save_patient(new_patient):
 # ---- MAIN UI ----
 st.title("🧠 MediScout Pakistan Prototype")
 
-# Toggle Register Form
+# ---- Toggle Register Form ----
 if st.button("➕ Register New Patient"):
     st.session_state.show_form = not st.session_state.show_form
 
-# Register New Patient Form
+# ---- Register New Patient ----
 if st.session_state.show_form:
     with st.form("patient_form"):
         st.subheader("Patient Registration Form")
@@ -116,7 +119,7 @@ if st.session_state.show_form:
             })
             st.success(f"Patient {name} added successfully!")
 
-# Delete Patient
+# ---- DELETE PATIENT ----
 st.subheader("🗑️ Delete Patient Record")
 del_name = st.text_input("Enter name to delete")
 if st.button("Delete Patient"):
@@ -128,7 +131,7 @@ if st.button("Delete Patient"):
     else:
         st.warning("Name not found.")
 
-# Search Patient
+# ---- SEARCH PATIENT ----
 st.subheader("🔍 Search Patient")
 search_name = st.text_input("Search by Name")
 if st.button("Search"):
@@ -140,61 +143,71 @@ if st.button("Search"):
     else:
         st.warning("No patient found.")
 
-# Load patient data for filtering & visualization
+# ---- IMAGE CLASSIFICATION ----
+st.header("📷 Disease Image Classification")
+uploaded_file = st.file_uploader("Upload an image of symptoms or medical scan", type=['jpg', 'jpeg', 'png'])
+
+if uploaded_file is not None:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Image", use_container_width=True)  # <-- FIX applied here
+
+    # Preprocess and classify image
+    model = models.resnet18(pretrained=True)
+    model.eval()
+    preprocess = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], 
+            std=[0.229, 0.224, 0.225])
+    ])
+
+    input_tensor = preprocess(image).unsqueeze(0)
+    with torch.no_grad():
+        output = model(input_tensor)
+    probabilities = torch.nn.functional.softmax(output[0], dim=0)
+
+    # Load ImageNet class labels (for example)
+    imagenet_labels = []
+    with open("imagenet_classes.txt", "r") as f:
+        imagenet_labels = [line.strip() for line in f.readlines()]
+
+    top_prob, top_catid = torch.topk(probabilities, 1)
+    classification = imagenet_labels[top_catid]
+
+    st.write(f"Image classified as: **{classification[0]}** with probability {top_prob.item():.4f}")
+
+# ---- Load and filter patient data for map and charts ----
 patients_df = load_patients()
 
 if not patients_df.empty:
-    # Add lat/lon for visualization simulation if missing
     if 'lat' not in patients_df.columns:
         patients_df['lat'] = [round(random.uniform(24.7, 25.3), 4) for _ in range(len(patients_df))]
     if 'lon' not in patients_df.columns:
         patients_df['lon'] = [round(random.uniform(67.0, 67.4), 4) for _ in range(len(patients_df))]
-
-    # Rename disease column for consistency
-    patients_df.rename(columns={'disease': 'diseases'}, inplace=True)
+    if 'disease_flag' not in patients_df.columns:
+        patients_df['disease_flag'] = patients_df['disease'].apply(lambda x: 1 if pd.notna(x) and x.strip() != "" else 0)
 
     st.header("📊 Filter Disease Data")
+    symptom_filter = st.selectbox("Select Symptom", patients_df['symptoms'].unique())
+    age_range = st.slider("Age Range", 1, 120, (1, 120))
+    gender_filter = st.selectbox("Select Gender", ['Select'] + list(patients_df['gender'].unique()))
 
-    symptoms_unique = patients_df['symptoms'].dropna().unique()
-    if len(symptoms_unique) == 0:
-        st.info("No symptom data available.")
-    else:
-        selected_symptom = st.selectbox("Select Symptom", symptoms_unique)
-        age_range = st.slider("Select Age Range", 1, 120, (1, 120))
-        gender_options = ['Select'] + patients_df['gender'].dropna().unique().tolist()
-        selected_gender = st.selectbox("Select Gender", gender_options)
+    filtered = patients_df[patients_df['symptoms'] == symptom_filter]
+    filtered = filtered[(filtered['age'] >= age_range[0]) & (filtered['age'] <= age_range[1])]
+    if gender_filter != 'Select':
+        filtered = filtered[filtered['gender'] == gender_filter]
 
-        filtered_df = patients_df[patients_df['symptoms'] == selected_symptom]
-        filtered_df = filtered_df[(filtered_df['age'] >= age_range[0]) & (filtered_df['age'] <= age_range[1])]
-        if selected_gender != 'Select':
-            filtered_df = filtered_df[filtered_df['gender'] == selected_gender]
+    st.write("Filtered Data", filtered)
+    st.map(filtered[['lat', 'lon']])
 
-        st.write("Filtered Data:", filtered_df)
-        st.map(filtered_df[['lat', 'lon']])
-
-        st.header("📈 Disease Counts")
-        if not filtered_df.empty:
-            fig, ax = plt.subplots()
-            filtered_df['diseases'].value_counts().plot(kind='bar', ax=ax)
-            ax.set_xlabel("Disease")
-            ax.set_ylabel("Count")
-            st.pyplot(fig)
-        else:
-            st.info("No data for selected filters.")
+    st.header("📈 Disease Counts")
+    if not filtered.empty:
+        fig, ax = plt.subplots()
+        filtered['disease'].value_counts().plot(kind='bar', ax=ax)
+        ax.set_xlabel("Disease")
+        ax.set_ylabel("Count")
+        st.pyplot(fig)
 else:
     st.info("No patient data available. Please add some records.")
-
-# ======= Image Classification Placeholder =======
-st.header("🖼️ Disease Image Classification")
-
-uploaded_file = st.file_uploader("Upload a medical image (e.g., skin lesion) for classification", type=["jpg", "jpeg", "png"])
-if uploaded_file is not None:
-    st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
-    st.write("Running image classification (demo)...")
-
-    # Here you would insert your AI model code to classify the image
-    # For demo, we just show a placeholder result:
-    import time
-    with st.spinner('Classifying...'):
-        time.sleep(2)  # Simulate processing time
-    st.success("Classification Result: Benign Lesion (Demo)")
