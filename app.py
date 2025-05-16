@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
-import torch
-from torchvision import models, transforms
-from PIL import Image
 import random
+from PIL import Image
+import torch
+import torchvision.transforms as transforms
+from torchvision.models import resnet50
 
 # ---- CONFIG ----
 st.set_page_config(page_title="MediScout Pakistan", layout="wide")
@@ -19,10 +20,6 @@ if 'username' not in st.session_state:
     st.session_state.username = ""
 if 'show_form' not in st.session_state:
     st.session_state.show_form = False
-if 'uploaded_image' not in st.session_state:
-    st.session_state.uploaded_image = None
-if 'image_classification' not in st.session_state:
-    st.session_state.image_classification = None
 
 # ---- USER MANAGEMENT FUNCTIONS ----
 def load_users():
@@ -91,8 +88,54 @@ def save_patient(new_patient):
     df = pd.concat([df, new_df], ignore_index=True)
     df.to_csv(PATIENT_FILE, index=False)
 
+# ---- IMAGE CLASSIFICATION SETUP ----
+@st.cache_resource(show_spinner=False)
+def load_model():
+    model = resnet50(pretrained=True)
+    model.eval()
+    return model
+
+model = load_model()
+
+@st.cache_data(show_spinner=False)
+def load_imagenet_classes():
+    with open("imagenet_classes.txt", "r") as f:
+        classes = [line.strip() for line in f.readlines()]
+    return classes
+
+imagenet_classes = load_imagenet_classes()
+
+def classify_image(image):
+    preprocess = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+    input_tensor = preprocess(image).unsqueeze(0)  # batch of 1
+    with torch.no_grad():
+        outputs = model(input_tensor)
+    _, predicted = outputs.max(1)
+    class_id = predicted.item()
+    return imagenet_classes[class_id]
+
 # ---- MAIN UI ----
 st.title("🧠 MediScout Pakistan Prototype")
+
+# ---- Image Upload and Classification ----
+st.header("Image Classification (Using ImageNet pre-trained ResNet50)")
+uploaded_file = st.file_uploader("Upload an image for classification", type=['png', 'jpg', 'jpeg'])
+
+if uploaded_file is not None:
+    image = Image.open(uploaded_file).convert('RGB')
+    st.image(image, caption="Uploaded Image", use_container_width=True)
+    if st.button("Classify Image"):
+        with st.spinner("Classifying..."):
+            label = classify_image(image)
+        st.success(f"Predicted Class: **{label}**")
 
 # ---- Toggle Register Form ----
 if st.button("➕ Register New Patient"):
@@ -143,42 +186,7 @@ if st.button("Search"):
     else:
         st.warning("No patient found.")
 
-# ---- IMAGE CLASSIFICATION ----
-st.header("📷 Disease Image Classification")
-uploaded_file = st.file_uploader("Upload an image of symptoms or medical scan", type=['jpg', 'jpeg', 'png'])
-
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", use_container_width=True)  # <-- FIX applied here
-
-    # Preprocess and classify image
-    model = models.resnet18(pretrained=True)
-    model.eval()
-    preprocess = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406], 
-            std=[0.229, 0.224, 0.225])
-    ])
-
-    input_tensor = preprocess(image).unsqueeze(0)
-    with torch.no_grad():
-        output = model(input_tensor)
-    probabilities = torch.nn.functional.softmax(output[0], dim=0)
-
-    # Load ImageNet class labels (for example)
-    imagenet_labels = []
-    with open("imagenet_classes.txt", "r") as f:
-        imagenet_labels = [line.strip() for line in f.readlines()]
-
-    top_prob, top_catid = torch.topk(probabilities, 1)
-    classification = imagenet_labels[top_catid]
-
-    st.write(f"Image classified as: **{classification[0]}** with probability {top_prob.item():.4f}")
-
-# ---- Load and filter patient data for map and charts ----
+# ---- PATIENT DATA FOR VISUALIZATION ----
 patients_df = load_patients()
 
 if not patients_df.empty:
@@ -187,14 +195,21 @@ if not patients_df.empty:
     if 'lon' not in patients_df.columns:
         patients_df['lon'] = [round(random.uniform(67.0, 67.4), 4) for _ in range(len(patients_df))]
     if 'disease_flag' not in patients_df.columns:
-        patients_df['disease_flag'] = patients_df['disease'].apply(lambda x: 1 if pd.notna(x) and x.strip() != "" else 0)
+        patients_df['disease_flag'] = patients_df['disease'].apply(lambda x: 1 if x else 0)
+    patients_df.rename(columns={'disease': 'diseases'}, inplace=True)
+    df_demo = patients_df.copy()
+else:
+    st.warning("No patient data found. Please add some records.")
+    df_demo = pd.DataFrame()
 
+# ---- FILTERS ----
+if not df_demo.empty:
     st.header("📊 Filter Disease Data")
-    symptom_filter = st.selectbox("Select Symptom", patients_df['symptoms'].unique())
+    symptom_filter = st.selectbox("Select Symptom", df_demo['symptoms'].unique())
     age_range = st.slider("Age Range", 1, 120, (1, 120))
-    gender_filter = st.selectbox("Select Gender", ['Select'] + list(patients_df['gender'].unique()))
+    gender_filter = st.selectbox("Select Gender", ['Select'] + list(df_demo['gender'].unique()))
 
-    filtered = patients_df[patients_df['symptoms'] == symptom_filter]
+    filtered = df_demo[df_demo['symptoms'] == symptom_filter]
     filtered = filtered[(filtered['age'] >= age_range[0]) & (filtered['age'] <= age_range[1])]
     if gender_filter != 'Select':
         filtered = filtered[filtered['gender'] == gender_filter]
@@ -205,9 +220,9 @@ if not patients_df.empty:
     st.header("📈 Disease Counts")
     if not filtered.empty:
         fig, ax = plt.subplots()
-        filtered['disease'].value_counts().plot(kind='bar', ax=ax)
+        filtered['diseases'].value_counts().plot(kind='bar', ax=ax)
         ax.set_xlabel("Disease")
         ax.set_ylabel("Count")
         st.pyplot(fig)
 else:
-    st.info("No patient data available. Please add some records.")
+    st.info("No data available to filter.")
