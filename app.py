@@ -10,8 +10,11 @@ from torchvision.models import resnet50
 
 # ---- CONFIG ----
 st.set_page_config(page_title="MediScout Pakistan", layout="wide")
-USERS_FILE = 'users.csv'
-PATIENT_FILE = 'patients.csv'
+os.makedirs("data", exist_ok=True)
+os.makedirs("patient_images", exist_ok=True)
+
+USERS_FILE = 'data/users.csv'
+PATIENT_FILE = 'data/patients.csv'
 
 # ---- SESSION STATE ----
 if 'logged_in' not in st.session_state:
@@ -20,15 +23,16 @@ if 'username' not in st.session_state:
     st.session_state.username = ""
 if 'show_form' not in st.session_state:
     st.session_state.show_form = False
+if 'uploaded_image' not in st.session_state:
+    st.session_state.uploaded_image = None
+if 'predicted_label' not in st.session_state:
+    st.session_state.predicted_label = None
 
-# ---- USER MANAGEMENT FUNCTIONS ----
+# ---- USER MANAGEMENT ----
 def load_users():
-    if os.path.exists(USERS_FILE):
-        try:
-            return pd.read_csv(USERS_FILE)
-        except:
-            return pd.DataFrame(columns=['username', 'password'])
-    else:
+    try:
+        return pd.read_csv(USERS_FILE)
+    except:
         return pd.DataFrame(columns=['username', 'password'])
 
 def save_user(username, password):
@@ -57,7 +61,7 @@ if not st.session_state.logged_in:
             if authenticate(username, password):
                 st.session_state.logged_in = True
                 st.session_state.username = username
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.sidebar.error("Invalid username or password.")
     else:
@@ -73,13 +77,13 @@ st.sidebar.success(f"Welcome, {st.session_state.username}")
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.session_state.username = ""
-    st.experimental_rerun()
+    st.rerun()
 
-# ---- PATIENT DATA HANDLING ----
+# ---- PATIENT DATA ----
 def load_patients():
-    if os.path.exists(PATIENT_FILE):
+    try:
         return pd.read_csv(PATIENT_FILE)
-    else:
+    except:
         return pd.DataFrame(columns=['name', 'age', 'gender', 'symptoms', 'disease'])
 
 def save_patient(new_patient):
@@ -88,7 +92,7 @@ def save_patient(new_patient):
     df = pd.concat([df, new_df], ignore_index=True)
     df.to_csv(PATIENT_FILE, index=False)
 
-# ---- IMAGE CLASSIFICATION SETUP ----
+# ---- IMAGE CLASSIFICATION ----
 @st.cache_resource(show_spinner=False)
 def load_model():
     model = resnet50(pretrained=True)
@@ -99,6 +103,13 @@ model = load_model()
 
 @st.cache_data(show_spinner=False)
 def load_imagenet_classes():
+    import requests
+    # Download if not already present
+    if not os.path.exists("imagenet_classes.txt"):
+        url = "https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"
+        response = requests.get(url)
+        with open("imagenet_classes.txt", "w") as f:
+            f.write(response.text)
     with open("imagenet_classes.txt", "r") as f:
         classes = [line.strip() for line in f.readlines()]
     return classes
@@ -115,33 +126,34 @@ def classify_image(image):
             std=[0.229, 0.224, 0.225]
         )
     ])
-    input_tensor = preprocess(image).unsqueeze(0)  # batch of 1
+    input_tensor = preprocess(image).unsqueeze(0)
     with torch.no_grad():
         outputs = model(input_tensor)
     _, predicted = outputs.max(1)
-    class_id = predicted.item()
-    return imagenet_classes[class_id]
+    return imagenet_classes[predicted.item()]
 
 # ---- MAIN UI ----
 st.title("🧠 MediScout Pakistan Prototype")
 
 # ---- Image Upload and Classification ----
-st.header("Image Classification (Using ImageNet pre-trained ResNet50)")
-uploaded_file = st.file_uploader("Upload an image for classification", type=['png', 'jpg', 'jpeg'])
+st.header("📷 Image Classification")
+uploaded_file = st.file_uploader("Upload an image of rash/infection for classification", type=['png', 'jpg', 'jpeg'])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')
+    st.session_state.uploaded_image = image
     st.image(image, caption="Uploaded Image", use_container_width=True)
+
     if st.button("Classify Image"):
         with st.spinner("Classifying..."):
             label = classify_image(image)
+        st.session_state.predicted_label = label
         st.success(f"Predicted Class: **{label}**")
 
-# ---- Toggle Register Form ----
+# ---- Register New Patient ----
 if st.button("➕ Register New Patient"):
     st.session_state.show_form = not st.session_state.show_form
 
-# ---- Register New Patient ----
 if st.session_state.show_form:
     with st.form("patient_form"):
         st.subheader("Patient Registration Form")
@@ -149,7 +161,7 @@ if st.session_state.show_form:
         age = st.number_input("Age", min_value=0, max_value=120)
         gender = st.selectbox("Gender", ['Male', 'Female', 'Other'])
         symptoms = st.text_input("Symptoms (comma separated)")
-        disease = st.text_input("Disease")
+        disease = st.text_input("Disease (or use classification result below)", value=st.session_state.predicted_label or "")
         submit = st.form_submit_button("Add Patient")
 
         if submit:
@@ -160,7 +172,11 @@ if st.session_state.show_form:
                 'symptoms': symptoms,
                 'disease': disease
             })
+            if st.session_state.uploaded_image:
+                image_path = f"patient_images/{name.replace(' ', '_')}.png"
+                st.session_state.uploaded_image.save(image_path)
             st.success(f"Patient {name} added successfully!")
+            st.session_state.show_form = False
 
 # ---- DELETE PATIENT ----
 st.subheader("🗑️ Delete Patient Record")
@@ -170,11 +186,14 @@ if st.button("Delete Patient"):
     if del_name in df['name'].values:
         df = df[df['name'] != del_name]
         df.to_csv(PATIENT_FILE, index=False)
+        image_path = f"patient_images/{del_name.replace(' ', '_')}.png"
+        if os.path.exists(image_path):
+            os.remove(image_path)
         st.success(f"Deleted {del_name}")
     else:
         st.warning("Name not found.")
 
-# ---- SEARCH PATIENT ----
+# ---- SEARCH ----
 st.subheader("🔍 Search Patient")
 search_name = st.text_input("Search by Name")
 if st.button("Search"):
@@ -183,12 +202,14 @@ if st.button("Search"):
     if not record.empty:
         st.success("Patient Found:")
         st.dataframe(record)
+        image_path = f"patient_images/{search_name.replace(' ', '_')}.png"
+        if os.path.exists(image_path):
+            st.image(Image.open(image_path), caption="Associated Image", use_container_width=True)
     else:
         st.warning("No patient found.")
 
-# ---- PATIENT DATA FOR VISUALIZATION ----
+# ---- VISUALIZATION ----
 patients_df = load_patients()
-
 if not patients_df.empty:
     if 'lat' not in patients_df.columns:
         patients_df['lat'] = [round(random.uniform(24.7, 25.3), 4) for _ in range(len(patients_df))]
@@ -197,19 +218,13 @@ if not patients_df.empty:
     if 'disease_flag' not in patients_df.columns:
         patients_df['disease_flag'] = patients_df['disease'].apply(lambda x: 1 if x else 0)
     patients_df.rename(columns={'disease': 'diseases'}, inplace=True)
-    df_demo = patients_df.copy()
-else:
-    st.warning("No patient data found. Please add some records.")
-    df_demo = pd.DataFrame()
 
-# ---- FILTERS ----
-if not df_demo.empty:
     st.header("📊 Filter Disease Data")
-    symptom_filter = st.selectbox("Select Symptom", df_demo['symptoms'].unique())
+    symptom_filter = st.selectbox("Select Symptom", patients_df['symptoms'].unique())
     age_range = st.slider("Age Range", 1, 120, (1, 120))
-    gender_filter = st.selectbox("Select Gender", ['Select'] + list(df_demo['gender'].unique()))
+    gender_filter = st.selectbox("Select Gender", ['Select'] + list(patients_df['gender'].unique()))
 
-    filtered = df_demo[df_demo['symptoms'] == symptom_filter]
+    filtered = patients_df[patients_df['symptoms'] == symptom_filter]
     filtered = filtered[(filtered['age'] >= age_range[0]) & (filtered['age'] <= age_range[1])]
     if gender_filter != 'Select':
         filtered = filtered[filtered['gender'] == gender_filter]
@@ -225,4 +240,4 @@ if not df_demo.empty:
         ax.set_ylabel("Count")
         st.pyplot(fig)
 else:
-    st.info("No data available to filter.")
+    st.info("No patient data available.")
